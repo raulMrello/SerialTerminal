@@ -35,9 +35,10 @@
 
 /** Archivos de cabecera */
 #include "mbed.h"
+#include "xSendRecvIface.h"
 
 
-class SerialTerminal : public RawSerial {
+class SerialTerminal : public RawSerial, public xSendRecvIface {
 
 public:
     /** Receiver_mode
@@ -45,6 +46,7 @@ public:
      *  ReceiveWithEofCharacter - Utiliza un caracter concreto como detección de fin de trama
      *  ReceiveWithDedicatedHandling - Utiliza una callback bool(uint8_t*,uint_16_t) para procesar
      *      cada byte recibido. Cuando la trama se haya completado, devolverá (true).
+     *  ReceiveAfterBreakTime - Utiliza la señalización BREAK o IDLE para notificar trama recibida
      */
     enum Receiver_mode{
         ReceiveWithEofCharacter,
@@ -59,9 +61,15 @@ public:
      *  @param rx Línea de recepción
      *  @param maxbufsize Tamaño del buffer de recepción (no se podrán recibir tramas de mayor tamaño)
      *  @param baud Velocidad del puerto serie
-     *  @param mode Modo de detección de fin de trama (por defecto eof \0)
+     *  @param mode Modo de detección de fin de trama (default: por línea IDLE)
      */
-    SerialTerminal(PinName tx, PinName rx, uint16_t maxbufsize = 256, int baud = MBED_CONF_PLATFORM_DEFAULT_SERIAL_BAUD_RATE, Receiver_mode mode = ReceiveWithEofCharacter);
+    SerialTerminal(PinName tx, PinName rx, uint16_t maxbufsize = 256, int baud = MBED_CONF_PLATFORM_DEFAULT_SERIAL_BAUD_RATE, Receiver_mode mode = ReceiveAfterBreakTime);
+
+
+    /**
+     * Destructor
+     */
+    ~SerialTerminal();
 
     /** config()
      *  Configura las callbacks, el timeout y el caracter de fin de trama
@@ -80,46 +88,11 @@ public:
      */
     void dedicatedHandling(Callback<bool(uint8_t*,uint16_t)> cb_proc) {_cb_proc = cb_proc;}
 
-    /** startReceiver()
-     *  Habilita el receptor en modo isr-managed y por lo tanto lo deja listo para recibir
-     *  datos en modo interrupción
-     */
-    void startReceiver(){ startManaged(false, true); }
-
-    /** stopReceiver()
-     *  Deshabilita el receptor en modo isr-managed y por lo tanto deja de recibir
-     *  datos en modo interrupción
-     */
-    void stopReceiver(){ stopManaged(false, true); }
-
-    /** startTransmitter()
-     *  Habilita el transmisor en modo isr-managed y por lo tanto lo deja listo para transmitir
-     *  datos en modo interrupción
-     */
-    void startTransmitter(){ startManaged(true, false); }
-
-    /** stopReceiver()
-     *  Deshabilita el transmisor en modo isr-managed y por lo tanto deja de enviar
-     *  datos en modo interrupción
-     */
-    void stopTransmitter(){ stopManaged(true, false); }    
-
     /** busy()
      *  Informa si el transmisor está ocupado o no
      *  @return True: ocupado, False: listo para enviar
      */
-    bool busy(){ return((_tosend > 0)? true : false);}    
-    
-    
-    /** send()
-     *  Prepara para una nueva transimisión gestionada por interrupciones. El final de transmisión 
-     *  se notifica invocando la callback
-     *  @param data Buffer de datos de origen
-     *  @param size Tamaño del buffer a enviar
-     *  @param cb_data_sent Callback a invocar al finalizar el envío
-     *  @return Indica si la transferencia se ha iniciado (true) o no (false)
-     */
-    bool send(void* data, uint16_t size, Callback<void()> tx_done);    
+    bool busy(){ return((_tosend > 0)? true : false);}
 
     /** recv()
      *  Lee el contenido del buffer de recepción hasta un máximo de maxsize bytes
@@ -129,62 +102,111 @@ public:
      *         de devolver los datos leídos. Por defecto, está activado.
      *  @return Número de bytes copiados
      */
-    uint16_t recv(void* buf, uint16_t maxsize, bool enable_receiver = true);
+    uint16_t recv(void* buf, uint16_t maxsize, bool enable_receiver);
 
     /** isTxManaged()
      *  Comprueba si el transmisor con gestión de interrupciones está habilitado
      *  @return estado del transmisor(true=habilitado)
      */
-    bool isTxManaged();
+    bool isTxManaged(){
+        return tx_managed;
+    }
 
     /** isRxManaged()
      *  Comprueba si el receptor con gestión de interrupciones está habilitado
      *  @return estado del receptor(true=habilitado)
      */
-    bool isRxManaged();
+    bool isRxManaged(){
+        return rx_managed;
+    }
+
+    /** xSendRecvIface
+     *  Habilita el receptor en modo isr-managed y por lo tanto lo deja listo para recibir
+     *  datos en modo interrupción
+     */
+    virtual void startReceiver(){ _startManaged(false, true); }
+
+    /** xSendRecvIface
+     *  Deshabilita el receptor en modo isr-managed y por lo tanto deja de recibir
+     *  datos en modo interrupción
+     */
+    virtual void stopReceiver(){ _stopManaged(false, true); }
+
+    /** xSendRecvIface
+     *  Habilita el transmisor en modo isr-managed y por lo tanto lo deja listo para transmitir
+     *  datos en modo interrupción
+     */
+    virtual void startTransmitter(){ _startManaged(true, false); }
+
+    /** xSendRecvIface
+     *  Deshabilita el transmisor en modo isr-managed y por lo tanto deja de enviar
+     *  datos en modo interrupción
+     */
+    virtual void stopTransmitter(){ _stopManaged(true, false); }
+
+    /** xSendRecvIface
+     *  Prepara para una nueva transimisión gestionada por interrupciones. El final de transmisión 
+     *  se notifica invocando la callback
+     *  @param data Buffer de datos de origen
+     *  @param size Tamaño del buffer a enviar
+     *  @param cb_data_sent Callback a invocar al finalizar el envío
+     *  @return Indica si la transferencia se ha iniciado (true) o no (false)
+     */
+    virtual bool send(void* data, uint16_t size, Callback<void()> tx_done = (Callback<void()>)NULL);
+
+    /** xSendRecvIface
+     *  Lee el contenido del buffer de recepción hasta un máximo de maxsize bytes
+     *  @param buf Buffer de destino en el que copiar la trama recibida
+     *  @param maxsize Tamaño del buffer de destino
+     *  @return Número de bytes copiados
+     */
+    virtual uint16_t recv(void* buf, uint16_t maxsize){
+    	return recv(buf, maxsize, true);
+    }
+
     
 protected:
 
-    /** startManaged()
+    /**
      *  Prepara el terminal para su funcionamiento, pudiendo preparar de forma independiente el transmisor
      *  y el receptor.
      *  @param transmitter Prepara el transmisor, habilitando las interrupciones de envío
      *  @param receiver Prepara el receptor, habilitando las interrupciones de recepción
      */
-    void startManaged(bool transmitter, bool receiver);
+    void _startManaged(bool transmitter, bool receiver);
 
-    /** stopManaged()
+    /**
      *  Desactiva el terminal, pudiendo desactivar de forma independiente el transmisor
      *  y el receptor.
      *  @param transmitter Desactiva el transmisor, deshabilitando las interrupciones de envío
      *  @param receiver Desactiva el receptor, deshabilitando las interrupciones de recepción
      */
-    void stopManaged(bool transmitter, bool receiver);
+    void _stopManaged(bool transmitter, bool receiver);
 
-    /** onTxData()
+    /**
      *  Manejador ISR de datos enviados vía serie
      */
-    void onTxData();
+    void _onTxData();
 
-    /** onRxData()
+    /**
      *  Manejador ISR de datos recibidos vía serie
      */
-    void onRxData();
+    void _onRxData();
 
-    /** onRxTimeout()
+    /**
      *  Manejador ISR de timeout en la recepción serie
      */
-    void onRxTimeout();
+    void _onRxTimeout();
 
     /** Acquire exclusive access to this serial port
      */
-    virtual void lock(void){
+    virtual void _lock(void){
         _mtx.lock();
     }
 
     /** Release exclusive access to this serial port
      */
-    virtual void unlock(void){
+    virtual void _unlock(void){
         _mtx.unlock();
     }
     
