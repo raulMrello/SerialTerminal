@@ -38,13 +38,84 @@
 static void unhandled_callback(){}
 static bool unhandled_callback_2(uint8_t* data, uint16_t size){return false;}
 
-//---------------------------------------------------------------------------------
-//- ISR ---------------------------------------------------------------------------
-//---------------------------------------------------------------------------------
+
 
 
 //---------------------------------------------------------------------------------
-void SerialTerminal::onTxData(){
+//- PUBLIC ------------------------------------------------------------------------
+//---------------------------------------------------------------------------------
+
+SerialTerminal::SerialTerminal(PinName tx, PinName rx, uint16_t maxbufsize, int baud, Receiver_mode mode) : RawSerial(tx, rx, baud){
+    attach(0, (SerialBase::IrqType)RxIrq);
+    attach(0, (SerialBase::IrqType)TxIrq);
+    _us_timeout = 0;
+    _mode = mode;
+    _recv = 0;
+    _eof = 0;
+    _bufsize = maxbufsize;
+    _databuf = new char[maxbufsize]();
+    MBED_ASSERT(_databuf);
+    _sent = 0;
+    _tosend = 0;
+    _tbuf = 0;
+    _cb_tx = callback(unhandled_callback);
+    _cb_rx = callback(unhandled_callback);
+    _cb_rx_tmr = callback(unhandled_callback);
+    _cb_rx_ovf = callback(unhandled_callback);
+    _cb_proc = callback(unhandled_callback_2);
+    tx_managed = false;
+    rx_managed = false;
+}
+
+//---------------------------------------------------------------------------------
+SerialTerminal::~SerialTerminal(){
+	stopTransmitter();
+	stopReceiver();
+	delete(_databuf);
+}
+
+//---------------------------------------------------------------------------------
+bool SerialTerminal::config(Callback<void()> rx_done, Callback <void()> rx_timeout, Callback <void()> rx_ovf, uint32_t us_timeout, char eof){
+    _cb_rx = rx_done;
+    _cb_rx_tmr = rx_timeout;
+    _cb_rx_ovf = rx_ovf;
+    _eof = eof;
+    _us_timeout = us_timeout;
+    return (_databuf && _bufsize)? true : false;
+}
+
+//---------------------------------------------------------------------------------
+bool SerialTerminal::send(void* data, uint16_t size, Callback<void()> tx_done){
+
+    if(_tosend == 0 && (uint8_t*)data && size){
+        _tosend = size;
+        _cb_tx = tx_done;
+        _tbuf = (uint8_t*)data;
+        startTransmitter();
+        return true;
+    }
+    return false;
+}
+
+//---------------------------------------------------------------------------------
+uint16_t SerialTerminal::recv(void* buf, uint16_t maxsize, bool enable_receiver){
+    uint16_t nb = (_recv > maxsize)? maxsize : _recv;
+    if(nb && (char*)buf){
+        memcpy((char*)buf, _databuf, nb);
+    }
+    if(enable_receiver){
+        startReceiver();
+    }
+    return nb;
+}
+
+
+//---------------------------------------------------------------------------------
+//- PRIVATE|PROTECTED -------------------------------------------------------------
+//---------------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------------
+void SerialTerminal::_onTxData(){
     if(writeable()){
         if(_sent < _tosend){
             putc(_tbuf[_sent++]);
@@ -58,7 +129,7 @@ void SerialTerminal::onTxData(){
 }
 
 //---------------------------------------------------------------------------------
-void SerialTerminal::onRxData(){
+void SerialTerminal::_onRxData(){
     while(readable()){
         // lee un byte
         char d = (char)getc();
@@ -86,14 +157,14 @@ void SerialTerminal::onRxData(){
         // si es el primer byte en modo distinto de breaktime, o en cada byte en modo break_time, inicia el timer
         else if(_mode == ReceiveAfterBreakTime || (_mode != ReceiveAfterBreakTime && _recv == 1)){
             if(_us_timeout > 0){
-                _tmr.attach_us(callback(this, &SerialTerminal::onRxTimeout), _us_timeout);
+                _tmr.attach_us(callback(this, &SerialTerminal::_onRxTimeout), _us_timeout);
             }
         }
     }
 }
 
 //---------------------------------------------------------------------------------
-void SerialTerminal::onRxTimeout(){
+void SerialTerminal::_onRxTimeout(){
     _tmr.detach();
     attach(0, (SerialBase::IrqType)RxIrq);
     // si es modo break_time, notifica fin de trama
@@ -105,59 +176,22 @@ void SerialTerminal::onRxTimeout(){
     _cb_rx_tmr.call();
 }
 
-
-
 //---------------------------------------------------------------------------------
-//- IMPL. -------------------------------------------------------------------------
-//---------------------------------------------------------------------------------
-
-SerialTerminal::SerialTerminal(PinName tx, PinName rx, uint16_t maxbufsize, int baud, Receiver_mode mode) : RawSerial(tx, rx, baud){
-    attach(0, (SerialBase::IrqType)RxIrq);
-    attach(0, (SerialBase::IrqType)TxIrq);
-    _us_timeout = 0;
-    _mode = mode;
-    _recv = 0;
-    _eof = 0;
-    _bufsize = maxbufsize;
-    _databuf = (char*)malloc(maxbufsize);
-    _sent = 0;
-    _tosend = 0;
-    _tbuf = 0;
-    _cb_tx = callback(unhandled_callback);
-    _cb_rx = callback(unhandled_callback);
-    _cb_rx_tmr = callback(unhandled_callback);
-    _cb_rx_ovf = callback(unhandled_callback);
-    _cb_proc = callback(unhandled_callback_2);
-    tx_managed = false;
-    rx_managed = false;
-}
-
-//---------------------------------------------------------------------------------
-bool SerialTerminal::config(Callback<void()> rx_done, Callback <void()> rx_timeout, Callback <void()> rx_ovf, uint32_t us_timeout, char eof){
-    _cb_rx = rx_done;
-    _cb_rx_tmr = rx_timeout;
-    _cb_rx_ovf = rx_ovf;
-    _eof = eof;
-    _us_timeout = us_timeout;
-    return (_databuf && _bufsize)? true : false;
-}
-
-//---------------------------------------------------------------------------------
-void SerialTerminal::startManaged(bool transmitter, bool receiver){
+void SerialTerminal::_startManaged(bool transmitter, bool receiver){
     if(transmitter){
         tx_managed = true;
         _sent = 0;
-        attach(callback(this, &SerialTerminal::onTxData), (SerialBase::IrqType)TxIrq);
+        attach(callback(this, &SerialTerminal::_onTxData), (SerialBase::IrqType)TxIrq);
     }
     if(receiver){
         rx_managed = true;
         _recv = 0;
-        attach(callback(this, &SerialTerminal::onRxData), (SerialBase::IrqType)RxIrq);
+        attach(callback(this, &SerialTerminal::_onRxData), (SerialBase::IrqType)RxIrq);
     }
 }
 
 //---------------------------------------------------------------------------------
-void SerialTerminal::stopManaged(bool transmitter, bool receiver){
+void SerialTerminal::_stopManaged(bool transmitter, bool receiver){
     if(transmitter){
         attach(0, (SerialBase::IrqType)TxIrq);
         tx_managed = false;
@@ -170,37 +204,3 @@ void SerialTerminal::stopManaged(bool transmitter, bool receiver){
     }
 }
 
-//---------------------------------------------------------------------------------
-bool SerialTerminal::send(void* data, uint16_t size, Callback<void()> tx_done){  
-    
-    if(_tosend == 0 && (uint8_t*)data && size){
-        _tosend = size;
-        _cb_tx = tx_done;
-        _tbuf = (uint8_t*)data;
-        startTransmitter();
-        return true;
-    }
-    return false;
-}
-
-//---------------------------------------------------------------------------------
-uint16_t SerialTerminal::recv(void* buf, uint16_t maxsize, bool enable_receiver){
-    uint16_t nb = (_recv > maxsize)? maxsize : _recv;
-    if(nb && (char*)buf){
-        memcpy((char*)buf, _databuf, nb);
-    }
-    if(enable_receiver){
-        startReceiver();
-    }
-    return nb;
-}
-
-//---------------------------------------------------------------------------------
-bool SerialTerminal::isTxManaged(){
-    return tx_managed;
-}
-
-//---------------------------------------------------------------------------------
-bool SerialTerminal::isRxManaged(){
-    return rx_managed;
-}
