@@ -46,12 +46,13 @@ public:
      *  ReceiveWithEofCharacter - Utiliza un caracter concreto como detección de fin de trama
      *  ReceiveWithDedicatedHandling - Utiliza una callback bool(uint8_t*,uint_16_t) para procesar
      *      cada byte recibido. Cuando la trama se haya completado, devolverá (true).
-     *  ReceiveAfterBreakTime - Utiliza la señalización BREAK o IDLE para notificar trama recibida
+     *  ReceiveAfterIdel - Utiliza una temporización de 2.5 veces el tiempo de byte para notificar
+     *  	que la trama se ha completado
      */
     enum Receiver_mode{
         ReceiveWithEofCharacter,
         ReceiveWithDedicatedHandling,
-        ReceiveAfterBreakTime,
+        ReceiveAfterIdle,
     };
     
     /** SerialTerminal()
@@ -63,7 +64,7 @@ public:
      *  @param baud Velocidad del puerto serie
      *  @param mode Modo de detección de fin de trama (default: por línea IDLE)
      */
-    SerialTerminal(PinName tx, PinName rx, uint16_t maxbufsize = 256, int baud = MBED_CONF_PLATFORM_DEFAULT_SERIAL_BAUD_RATE, Receiver_mode mode = ReceiveAfterBreakTime);
+    SerialTerminal(PinName tx, PinName rx, uint16_t maxbufsize = 256, int baud = MBED_CONF_PLATFORM_DEFAULT_SERIAL_BAUD_RATE, Receiver_mode mode = ReceiveAfterIdle);
 
 
     /**

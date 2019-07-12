@@ -50,6 +50,11 @@ SerialTerminal::SerialTerminal(PinName tx, PinName rx, uint16_t maxbufsize, int 
     attach(0, (SerialBase::IrqType)TxIrq);
     _us_timeout = 0;
     _mode = mode;
+    // en modo detección de IDLE line, el timeout saltará a los 2.5 veces el tiempo de byte
+    // en función del baudrate seleccionado
+    if(_mode == ReceiveAfterIdle){
+    	_us_timeout = (uint32_t)((2.5 * 10 * 1000000)/baud);
+    }
     _recv = 0;
     _eof = 0;
     _bufsize = maxbufsize;
