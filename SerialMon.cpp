@@ -28,6 +28,8 @@
 
 #include "SerialMon.h"
 
+static const char* _MODULE_ = "[SerialMon].....";
+#define _EXPR_	(!IS_ISR())
 
 
 //--------------------------------------------------------------------------------------------------------------
@@ -38,6 +40,8 @@
 //---------------------------------------------------------------------------------
 SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name) : _name(name) {
 	
+	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Iniciando SerialMon: %s", name);
+
 	// inicializa buffers
     _txbuf.mem = new char[txBufferSize]();
     MBED_ASSERT(_txbuf.mem);
@@ -56,8 +60,8 @@ SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize,
 	memset(_rxbuf.mem, 0, rxBufferSize);
 
 	/** Inicializa callbacks */
-    _cb_rx = Callback< void(uint8_t*, int, Flags)> NULL;
-    _cb_tx = Callback< void(Flags)> NULL;
+    _cb_rx = (Callback< void(uint8_t*, int, Flags)>) NULL;
+    _cb_tx = (Callback< void(Flags)>) NULL;
 
 	
 	// inicia el dispositivo serie,
@@ -90,8 +94,8 @@ SerialMon::~SerialMon(){
     delete(_serial);
 
     // libera buffers
-    delete(_txbuf);
-    delete(_rxbuf);
+    delete(_txbuf.mem);
+    delete(_rxbuf.mem);
 
     // finaliza el hilo
 	_th->join();
@@ -101,7 +105,14 @@ SerialMon::~SerialMon(){
 
 
 //---------------------------------------------------------------------------------
+void SerialMon::setLoggingLevel(esp_log_level_t level){
+	esp_log_level_set(_MODULE_, level);
+}
+
+//---------------------------------------------------------------------------------
 void SerialMon::start(osPriority priority, uint32_t stack_size){
+	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Arrancando thread SerialMon: %s", _name);
+
 	// si el no existe, lo crea
 	if(_th == NULL){
 		_th = new Thread(priority, stack_size, NULL, _name);
@@ -116,13 +127,13 @@ void SerialMon::start(osPriority priority, uint32_t stack_size){
 
 
 //---------------------------------------------------------------------------------
-void SerialMon::attachRxCallback(Callback<void(uint8_t*, int, SerialMon::Flags)>& cb){
+void SerialMon::attachRxCallback(Callback<void(uint8_t*, int, SerialMon::Flags)> cb){
 	_cb_rx = cb;
 }
 
 
 //---------------------------------------------------------------------------------
-void SerialMon::attachTxCallback(Callback<void(SerialMon::Flags)>& cb){
+void SerialMon::attachTxCallback(Callback<void(SerialMon::Flags)> cb){
 	_cb_tx = cb;
 }
 
@@ -200,6 +211,8 @@ void SerialMon::_task(){
     // se conecta al módulo de recepción
     _serial->attach(callback(this, &SerialMon::_rxCallback), (SerialBase::IrqType)RxIrq);
 
+    DEBUG_TRACE_D(_EXPR_, _MODULE_, "Thread iniciado SerialMon: %s. Esperando eventos", _name);
+
     // espera eventos hardware forever and ever...
     for(;;){
         osEvent oe = _th->signal_wait(osFlagsWaitAny, osWaitForever);
@@ -209,6 +222,7 @@ void SerialMon::_task(){
 			// despacha las trama pendiente
         	int len=0;
         	uint8_t* data = _read(len);
+        	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Notificando trama recibida size=%d", len);
 			_cb_rx(data, len, FLAG_EOR);
 			if(data){
 				delete(data);
@@ -219,12 +233,14 @@ void SerialMon::_task(){
 
         // si es un flag de timeout, lo notifica
         if(oe.status == osEventSignal && (oe.value.signals & FLAG_RTIMED) != 0){
+        	DEBUG_TRACE_W(_EXPR_, _MODULE_, "Notificando FLAG_RTIMED");
         	_cb_rx(0, 0, FLAG_RTIMED);
         	_th->signal_clr(FLAG_RTIMED);
         }
 
         // si es un flag de error en recepción por buffer lleno, lo notifica
         if(oe.status == osEventSignal && (oe.value.signals & FLAG_RXFULL) != 0){
+        	DEBUG_TRACE_W(_EXPR_, _MODULE_, "Notificando FLAG_RXFULL");
         	_cb_rx(0, 0, FLAG_RXFULL);
         	_th->signal_clr(FLAG_RXFULL);
         }
@@ -235,7 +251,8 @@ void SerialMon::_task(){
         	if(_sem != NULL){
         		_sem->release();
         	}
-        	_cb_tx(0, 0, FLAG_EOT);
+        	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Notificando trama enviada");
+        	_cb_tx(FLAG_EOT);
         	_th->signal_clr(FLAG_EOT);
         }
     }

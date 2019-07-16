@@ -31,6 +31,8 @@
 
 
 #include "mbed.h"
+#include "ISerial.h"
+#include "mdf_api_cortex.h"
 
 
 
@@ -39,7 +41,7 @@
  *         de envío y recepción. Se ejecuta en su propio hilo, utiliza callbacks de notificación
  */
 
-class SerialMon {
+class SerialMon : public ISerial {
 public:
 
     /**--------------------------------------------------------------------------------------
@@ -60,6 +62,12 @@ public:
     virtual ~SerialMon();
 
 
+    /**--------------------------------------------------------------------------------------
+     * Actualiza el nivel de visualización de las tramas de depuración
+     */
+    void setLoggingLevel(esp_log_level_t level);
+
+
 	/**--------------------------------------------------------------------------------------
 	 * Inicia la ejecución de su hilo de control
 	 * @param priority Prioridad del thread
@@ -69,69 +77,37 @@ public:
 
 
     /**--------------------------------------------------------------------------------------
-     * Flags de señalización de estados
-     */
-    enum Flags {
-        FLAG_EOT = 		(1<<0), ///< Flag de fin de transmisión
-		FLAG_EOR = 		(1<<1),	///< Flag de fin de recepción
-		FLAG_RTIMED =   (1<<2),	///< Flag para indicar que ha ocurrido timeout en recepción
-		FLAG_SENDING = 	(1<<3),	///< Flag para indicar que hay un proceso de envío en marcha
-		FLAG_RXFULL =	(1<<4),	///< Flag para indicar que el buffer de recepción está lleno
-		FLAG_RXFULL =  	(1<<5),	///< Flag para indicar que el buffer de transmisión está lleno
-		FLAG_STARTED = 	(1<<6),	///< Flag para indicar que el objeto está iniciado
-    };
-
-    /**--------------------------------------------------------------------------------------
-     * Tipos de callback instalables
-     */
-    enum CallbackType{
-    	CbRx,		//!< Callback para procesar eventos de recepción
-		CbTx,		//!< Callbacks para procesar eventos de transmisión
-    };
-
-
-    /**--------------------------------------------------------------------------------------
-	 * Método para registrar diferentes callbacks relativas a la comunicación
+	 * [ISerial] Método para registrar diferentes callbacks relativas a la comunicación
      * @param type Tipo de callback a registrar
 	 * @param cb Callback
      */
-    void attachRxCallback(Callback<void(uint8_t* , int , Flags)>& cb);
+    virtual void attachRxCallback(Callback<void(uint8_t* , int , Flags)> cb);
 
 
     /**--------------------------------------------------------------------------------------
-	 * Método para registrar diferentes callbacks relativas a la comunicación
+	 * [ISerial] Método para registrar diferentes callbacks relativas a la comunicación
      * @param type Tipo de callback a registrar
 	 * @param cb Callback
      */
-    void attachTxCallback(Callback<void(Flags)>& cb);
+    virtual void attachTxCallback(Callback<void(Flags)> cb);
 
 	
     /**--------------------------------------------------------------------------------------
-     * Método para enviar un buffer de datos con un tamaño concreto
+     * [ISerial] Método para enviar un buffer de datos con un tamaño concreto
      * @param data buffer a enviar
 	 * @param size tamaño del buffer a enviar
 	 * @return Datos enviados (en caso de error <0)
      */
-    int send(uint8_t *data, int size);
+    virtual int send(uint8_t *data, int size);
 
 
     /**--------------------------------------------------------------------------------------
-     * Idem que el anterior, pero bloqueante hasta que no se detecta el flag EOT
+     * [ISerial] Idem que el anterior, pero bloqueante hasta que no se detecta el flag EOT
      * @param data buffer a enviar
 	 * @param size tamaño del buffer a enviar
 	 * @return Datos enviados (en caso de error <0)
      */
-    int sendComplete(uint8_t *data, int size);
-
-    
-    /**--------------------------------------------------------------------------------------
-     * Estructura de datos por defecto para los topics aceptados por este componente en el
-	 * mecanismo pub-sub
-     */
-    typedef struct {
-        uint8_t * data;
-		int size;
-    }topic_t;
+    virtual int sendComplete(uint8_t *data, int size);
 
 
 protected:
@@ -168,7 +144,7 @@ protected:
 	int _stat;
 
 	/** Nombre asociado al thread */
-    char * _name;
+    const char * _name;
 
     /** Buffers de transmisión y recepción */
     buffer_t _txbuf;
