@@ -120,7 +120,7 @@ void SerialMon::start(osPriority priority, uint32_t stack_size){
 	}
 
 	// si no está iniciado lo hace
-	if(_th->get_state() == Thread::Inactive){
+	if(_th->get_state() == Thread::Deleted){
 		_th->start(callback(this, &SerialMon::_task));
 	}
 }
