@@ -38,7 +38,7 @@ static const char* _MODULE_ = "[SerialMon].....";
 
 
 //---------------------------------------------------------------------------------
-SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name) : _name(name) {
+SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name) : _name(name), ISerial() {
 	
 	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Iniciando SerialMon: %s", name);
 
@@ -103,7 +103,6 @@ SerialMon::~SerialMon(){
     delete(_th);
 }
 
-
 //---------------------------------------------------------------------------------
 void SerialMon::setLoggingLevel(esp_log_level_t level){
 	esp_log_level_set(_MODULE_, level);
@@ -161,11 +160,7 @@ int SerialMon::send(uint8_t* data, int size){
     // si no hay ningún envío en marcha, lo inicia asociando el manejador de interrupciones
     if((_stat & FLAG_SENDING)==0){
         _stat |= FLAG_SENDING;
-        if((_stat & FLAG_STARTED)!=0){
-            _serial->attach(0, (SerialBase::IrqType)TxIrq);
-            _txCallback();
-        }
-        _stat |= FLAG_STARTED;
+        _txCallback();
         _serial->attach(callback(this, &SerialMon::_txCallback), (SerialBase::IrqType)TxIrq);
     }
 
@@ -222,7 +217,20 @@ void SerialMon::_task(){
 			// despacha las trama pendiente
         	int len=0;
         	uint8_t* data = _read(len);
+        	if(len > _rxbuf.sz){
+        		DEBUG_TRACE_E(_EXPR_, _MODULE_, "Error en recepcion size=%d > max=%d", len, _rxbuf.sz);
+        		_rxbuf.in = _rxbuf.mem;
+        		_rxbuf.ou = _rxbuf.mem;
+        		_stat &= ~FLAG_RXFULL;
+        		if(data){
+        			delete(data);
+        		}
+        		// borra el flag
+				_th->signal_clr(FLAG_EOR);
+				continue;
+        	}
         	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Notificando trama recibida size=%d", len);
+        	//DEBUG_TRACE_I(_EXPR_, _MODULE_, "r_in=%x, r_ou=%x, r_limit=%x", _rxbuf.in, _rxbuf.ou, _rxbuf.limit);
 			_cb_rx(data, len, FLAG_EOR);
 			if(data){
 				delete(data);
@@ -261,7 +269,7 @@ void SerialMon::_task(){
 
 //---------------------------------------------------------------------------------
 uint8_t* SerialMon::_read(int& size) {
-	size = (_rxbuf.ou <= _rxbuf.in)? (_rxbuf.in - _rxbuf.ou) : (_rxbuf.limit - _rxbuf.in) + (_rxbuf.ou - _rxbuf.mem);
+	size = (_rxbuf.ou <= _rxbuf.in)? (_rxbuf.in - _rxbuf.ou) : (_rxbuf.limit - _rxbuf.ou) + (_rxbuf.in - _rxbuf.mem);
 	if(size <= 0){
 		return NULL;
 	}
@@ -281,13 +289,14 @@ uint8_t* SerialMon::_read(int& size) {
 //---------------------------------------------------------------------------------
 void SerialMon::_txCallback(){
 	// envía el siguiente dato pendiente de envío
-    if ((_serial->writeable()) && (_txbuf.in != _txbuf.ou)) {
+    if((_serial->writeable()) && (_txbuf.in != _txbuf.ou)) {
         char c = *_txbuf.ou;
         _serial->putc(c);
         _txbuf.ou++;
         _txbuf.ou = (_txbuf.ou >= _txbuf.limit)? _txbuf.mem : _txbuf.ou;
         return;
     }
+
 	// si ha terminado, borra el flag de envío y activa el flag EOT
     _stat &= ~FLAG_SENDING;
 
@@ -321,8 +330,19 @@ void SerialMon::_rxCallback(){
             _stat |= FLAG_RXFULL;
         }
 
-		// reajusta el timer de detección de línea IDLE
-        _rx_tick.attach_us(callback(this, &SerialMon::_timeoutCallback), _us_timeout);
+        if (ISerial::_eor_mode == ISerial::EORByIdleTime){
+        	// reajusta el timer de detección de línea IDLE
+        	_rx_tick.attach_us(callback(this, &SerialMon::_timeoutCallback), _us_timeout);
+        }
+        else if (ISerial::_eor_mode == ISerial::EORByFlagSize){
+        	ISerial::AnalysisResult res = ISerial::_analyzeByte(c);
+        	if(res == ISerial::Wrong){
+        		_th->signal_set(FLAG_RXERROR);
+        	}
+        	else if(res == ISerial::Valid){
+        		_th->signal_set(FLAG_EOR);
+        	}
+        }
     }
 }
 
