@@ -116,11 +116,11 @@ protected:
      * Estructura de datos del buffer utilizado en transmisión y recepción
      */
      typedef struct {
-        char* mem;			///< Puntero a la memoria reservada al buffer
-        char* limit;		///< Ultima posición del buffer
-        char* in;			///< Posición de escritura en el buffer
-        char* ou;			///< Posición de lectura del buffer
-        int sz;				///< Tamaño del buffer
+    	 uint8_t* mem;			///< Puntero a la memoria reservada al buffer
+    	 uint8_t* limit;		///< Ultima posición del buffer
+    	 uint8_t* in;			///< Posición de escritura en el buffer
+    	 uint8_t* ou;			///< Posición de lectura del buffer
+    	 uint32_t sz;			///< Tamaño del buffer
     }buffer_t;
 
 
@@ -154,6 +154,10 @@ protected:
     Callback<void(uint8_t* data, int size, Flags flags)> _cb_rx;
     Callback<void(Flags flags)> _cb_tx;
 
+    /** Controladores del análisis de datos en isr y en tarea */
+    ISerial::AnalysisCtrl ac_isr;
+    ISerial::AnalysisCtrl ac_task;
+
 
     /**--------------------------------------------------------------------------------------
      *	Hilo de ejecución
@@ -180,6 +184,12 @@ protected:
      * Callback propia para manejar las interrupciones de recepción del puerto serie
      */
     void _rxCallback();
+
+
+    /**--------------------------------------------------------------------------------------
+     * Callback propia para manejar las interrupciones IDLE del puerto serie
+     */
+    void _rxIdleCallback();
 
 
     /**--------------------------------------------------------------------------------------

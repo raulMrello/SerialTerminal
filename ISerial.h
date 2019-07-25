@@ -46,20 +46,22 @@ public:
      * Flags de señalización de estados
      */
     enum Flags {
-        FLAG_EOT = 		(1<<0), ///< Flag de fin de transmisión
-		FLAG_EOR = 		(1<<1),	///< Flag de fin de recepción
-		FLAG_RTIMED =   (1<<2),	///< Flag para indicar que ha ocurrido timeout en recepción
-		FLAG_SENDING = 	(1<<3),	///< Flag para indicar que hay un proceso de envío en marcha
-		FLAG_RXFULL =	(1<<4),	///< Flag para indicar que el buffer de recepción está lleno
-		FLAG_TXFULL =  	(1<<5),	///< Flag para indicar que el buffer de transmisión está lleno
-		FLAG_RXERROR = 	(1<<6),	///< Flag para indicar un error en la recepción
+        FLAG_EOT = 			(1<<0), ///< Flag de fin de transmisión
+		FLAG_EOR = 			(1<<1),	///< Flag de fin de recepción
+		FLAG_RTIMED =   	(1<<2),	///< Flag para indicar que ha ocurrido timeout en recepción
+		FLAG_SENDING = 		(1<<3),	///< Flag para indicar que hay un proceso de envío en marcha
+		FLAG_RXSTARTED = 	(1<<4),	///< Flag para indicar que hay un proceso de recepción en marcha
+		FLAG_RXFULL =		(1<<5),	///< Flag para indicar que el buffer de recepción está lleno
+		FLAG_TXFULL =  		(1<<6),	///< Flag para indicar que el buffer de transmisión está lleno
+		FLAG_RXERROR = 		(1<<7),	///< Flag para indicar un error en la recepción
     };
 
 	/**--------------------------------------------------------------------------------------
 	 * Tipos de detección de fin de trama
 	 */
 	enum EORMode{
-		EORByIdleTime,	//!< Tras una temporización entre bytes recibidos (2.5 veces t_byte)
+		EORByIdleTime,	//!< Tras una detección de IDLE
+		EORByTicker,	//!< Tras una temporización del ticker
 		EORByFlagSize,	//!< Tras cumplirse una condición de flags (HEAD, FOOT) y size
 	};
 
@@ -80,13 +82,12 @@ public:
 
 
     /**--------------------------------------------------------------------------------------
-	 * Destructor
+	 * Constructor
+	 * @param t_bytes Tiempo del nº de bytes para notificar un fin de recepción
      */
-    ISerial(){
-    	_eor_mode = EORByIdleTime;
-    	_total_size = 0;
-    	_count = 0;
-    	_size[0]=0;_size[1]=0;_size[2]=0;_size[3]=0;
+    ISerial(float t_bytes){
+    	_t_bytes = t_bytes;
+    	_eor_mode = EORByTicker;
     }
 
 
@@ -97,7 +98,7 @@ public:
 
 
     /**--------------------------------------------------------------------------------------
-	 * Método para configurar el modo EORByFlagSize
+	 * Método para configurar el modo de análisis de la trama recibida
      * @param header Flag de inicio de trama
      * @param footer Flag de fin de trama
 	 * @param pos_size Posición del tamaño
@@ -105,15 +106,13 @@ public:
 	 * @param little_endian Endian del tamaño de trama
 	 * @param max_size Máximo tamaño de la trama permitido
      */
-    virtual void setModeEOR(uint8_t header, uint8_t footer, uint16_t pos_size, uint8_t len_size, bool little_endian, uint32_t max_size){
-    	_eor_mode = EORByFlagSize;
+    virtual void cfgStreamAnalyzer(uint8_t header, uint8_t footer, uint16_t pos_size, uint8_t len_size, bool little_endian, uint32_t max_size){
     	_eor_fs_cfg.header = header;
     	_eor_fs_cfg.footer = footer;
     	_eor_fs_cfg.pos_size = pos_size;
     	_eor_fs_cfg.len_size = len_size;
     	_eor_fs_cfg.little_endian = little_endian;
     	_eor_fs_cfg.max_size = max_size;
-    	_count = 0;
     }
 
 
@@ -153,14 +152,23 @@ public:
 protected:
     EORMode _eor_mode;
     EORFlagSize_t _eor_fs_cfg;
-    uint32_t _count;
-    uint8_t _size[4];
-    uint32_t _total_size;
+    float _t_bytes;
+
+    /**
+     * Estructura de control para el análisis EORFlagSize
+     */
+    struct AnalysisCtrl{
+    	uint32_t count;
+    	uint8_t size[4];
+    	uint32_t total_size;
+    };
 
     /**
      * Posibles estados del análisis del detector EORFlagSize
      */
     enum AnalysisResult{
+    	Discarded,
+    	Start,
     	Wrong,
 		Analyzing,
 		Valid,
@@ -168,58 +176,59 @@ protected:
 
     /**
      * Analiza el siguiente byte recibido, ejecutando la máquina de control del detector EORFlagSize
-     * @param data Siguiente byte a analizar
+     * @param data Byte a analizar
      * @return Estado del análisis
      */
-    virtual AnalysisResult _analyzeByte(uint8_t data){
-    	if(_count == 0 && data == _eor_fs_cfg.header){
-    		_count++;
-    		_size[0]=0;_size[1]=0;_size[2]=0;_size[3]=0;
-    		_total_size=0;
-    		return Analyzing;
+    virtual AnalysisResult _analyzeByte(uint8_t data, AnalysisCtrl &ac){
+
+    	if(ac.count == 0 && data == _eor_fs_cfg.header){
+    		ac.count++;
+    		ac.size[0]=0;ac.size[1]=0;ac.size[2]=0;ac.size[3]=0;
+    		ac.total_size=0;
+    		return Start;
     	}
-    	if(_count > 0){
-    		if(_count >= _eor_fs_cfg.pos_size && _count < _eor_fs_cfg.pos_size + _eor_fs_cfg.len_size){
-    			_size[_count - _eor_fs_cfg.pos_size]=data;
-    			_count++;
-    			if(_count == _eor_fs_cfg.pos_size + _eor_fs_cfg.len_size){
+    	if(ac.count > 0){
+    		if(ac.count >= _eor_fs_cfg.pos_size && ac.count < _eor_fs_cfg.pos_size + _eor_fs_cfg.len_size){
+    			ac.size[ac.count - _eor_fs_cfg.pos_size]=data;
+    			ac.count++;
+    			if(ac.count == _eor_fs_cfg.pos_size + _eor_fs_cfg.len_size){
     				if(_eor_fs_cfg.little_endian){
     					switch(_eor_fs_cfg.len_size){
 							case 1:
-								_total_size = _size[0];
+								ac.total_size = ac.size[0];
 								break;
 							case 2:
-								_total_size = (((uint32_t)_size[0])<<8) + ((uint32_t)_size[1]);
+								ac.total_size = (((uint32_t)ac.size[0])<<8) + ((uint32_t)ac.size[1]);
 								break;
 							case 4:
-								_total_size = (((uint32_t)_size[0])<<24) + (((uint32_t)_size[1])<<16) + (((uint32_t)_size[2])<<8) + ((uint32_t)_size[3]);
+								ac.total_size = (((uint32_t)ac.size[0])<<24) + (((uint32_t)ac.size[1])<<16) + (((uint32_t)ac.size[2])<<8) + ((uint32_t)ac.size[3]);
 								break;
     					}
     				}
     				else{
     					switch(_eor_fs_cfg.len_size){
 							case 1:
-								_total_size = _size[0];
+								ac.total_size = ac.size[0];
 								break;
 							case 2:
-								_total_size = (((uint32_t)_size[1])<<8) + ((uint32_t)_size[0]);
+								ac.total_size = (((uint32_t)ac.size[1])<<8) + ((uint32_t)ac.size[0]);
 								break;
 							case 4:
-								_total_size = (((uint32_t)_size[3])<<24) + (((uint32_t)_size[2])<<16) + (((uint32_t)_size[1])<<8) + ((uint32_t)_size[0]);
+								ac.total_size = (((uint32_t)ac.size[3])<<24) + (((uint32_t)ac.size[2])<<16) + (((uint32_t)ac.size[1])<<8) + ((uint32_t)ac.size[0]);
 								break;
     					}
 					}
-    				if(_total_size > _eor_fs_cfg.max_size){
-    					_count = 0;
+    				if(ac.total_size > _eor_fs_cfg.max_size){
+    					ac.count = 0;
     					return Wrong;
     				}
     			}
     			return Analyzing;
     		}
-    		if(_count < _total_size){
-    			_count++;
-    			if(_count == _total_size){
-    				_count = 0; _total_size = 0;
+    		if(ac.count < ac.total_size){
+    			ac.count++;
+    			if(ac.count == ac.total_size){
+    				ac.count = 0; ac.total_size = 0;
 					if(data == _eor_fs_cfg.footer){
 						return Valid;
 					}
@@ -228,8 +237,8 @@ protected:
     			return Analyzing;
     		}
     	}
-    	_count = 0; _total_size = 0;
-    	return Wrong;
+    	ac.count = 0; ac.total_size = 0;
+    	return Discarded;
     }
 
 };
