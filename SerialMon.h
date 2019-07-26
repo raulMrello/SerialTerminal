@@ -157,11 +157,9 @@ protected:
     Callback<void(Flags flags)> _cb_tx;
 
     /** Controladores del análisis de datos en isr y en tarea */
-    ISerial::AnalysisCtrl ac_isr;
     ISerial::AnalysisCtrl ac_task;
 
     /** Variables de control del procesado de la trama en curso */
-    uint32_t _max_msg_size;
     uint8_t* _curr_rx_msg;
     uint8_t* _curr_rx_msg_start;
 
