@@ -33,6 +33,7 @@
 #include "mbed.h"
 #include "ISerial.h"
 #include "mdf_api_cortex.h"
+#include "cpp_utils.h"
 
 
 
@@ -70,10 +71,11 @@ public:
 
 	/**--------------------------------------------------------------------------------------
 	 * Inicia la ejecución de su hilo de control
+	 * @param max_msg_size Tamaño máximo de la trama de recepción
 	 * @param priority Prioridad del thread
 	 * @param stack_size Tamaño de pila asociada
      */
-    void start(osPriority priority=osPriorityNormal, uint32_t stack_size = OS_STACK_SIZE);
+    void start(uint32_t max_msg_size, osPriority priority=osPriorityNormal, uint32_t stack_size = OS_STACK_SIZE);
 
 
     /**--------------------------------------------------------------------------------------
@@ -116,11 +118,11 @@ protected:
      * Estructura de datos del buffer utilizado en transmisión y recepción
      */
      typedef struct {
-        char* mem;			///< Puntero a la memoria reservada al buffer
-        char* limit;		///< Ultima posición del buffer
-        char* in;			///< Posición de escritura en el buffer
-        char* ou;			///< Posición de lectura del buffer
-        int sz;				///< Tamaño del buffer
+    	 uint8_t* mem;			///< Puntero a la memoria reservada al buffer
+    	 uint8_t* limit;		///< Ultima posición del buffer
+    	 uint8_t* in;			///< Posición de escritura en el buffer
+    	 uint8_t* ou;			///< Posición de lectura del buffer
+    	 uint32_t sz;			///< Tamaño del buffer
     }buffer_t;
 
 
@@ -154,6 +156,15 @@ protected:
     Callback<void(uint8_t* data, int size, Flags flags)> _cb_rx;
     Callback<void(Flags flags)> _cb_tx;
 
+    /** Controladores del análisis de datos en isr y en tarea */
+    ISerial::AnalysisCtrl ac_isr;
+    ISerial::AnalysisCtrl ac_task;
+
+    /** Variables de control del procesado de la trama en curso */
+    uint32_t _max_msg_size;
+    uint8_t* _curr_rx_msg;
+    uint8_t* _curr_rx_msg_start;
+
 
     /**--------------------------------------------------------------------------------------
      *	Hilo de ejecución
@@ -162,24 +173,22 @@ protected:
 
 
     /**--------------------------------------------------------------------------------------
-     * Rutina para determinar si hay datos pendientes por leer en el buffer de recepción
-     * @return true si hay datos, false en caso contrario
+     * Lee el buffer de recepción, analizándolo y notificando a la callback _cb_rx en caso de
+     * encontrar una trama válida. Termina cuando no quedan más bytes que procesar.
      */
-    bool _readable() { return (((_rxbuf.in != _rxbuf.ou) || (_rxbuf.in == _rxbuf.ou && (_stat & FLAG_RXFULL)!=0))? true : false); }
-
-
-    /**--------------------------------------------------------------------------------------
-     * Método para leer los datos recibidos del buffer de recepción
-	 * @param len Recibe el tamaño de los datos
-     * @return Puntero al buffer creado. Se debe liberar con delete(buffer);
-     */
-    uint8_t* _read(int& len);
+    void _read();
 
 
     /**--------------------------------------------------------------------------------------
      * Callback propia para manejar las interrupciones de recepción del puerto serie
      */
     void _rxCallback();
+
+
+    /**--------------------------------------------------------------------------------------
+     * Callback propia para manejar las interrupciones IDLE del puerto serie
+     */
+    void _rxIdleCallback();
 
 
     /**--------------------------------------------------------------------------------------
@@ -193,6 +202,12 @@ protected:
      */
     void _timeoutCallback();
 
+
+    /**--------------------------------------------------------------------------------------
+     * Manejadores por defecto de las callbacks no instaladas en la notificación de eventos
+     */
+    void _defaultRxUnhandledCallback(uint8_t* data, int size, Flags flag){}
+    void _defaultTxUnhandledCallback(Flags flag){}
 };
 
 
