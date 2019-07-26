@@ -48,12 +48,13 @@ public:
     enum Flags {
         FLAG_EOT = 			(1<<0), ///< Flag de fin de transmisión
 		FLAG_EOR = 			(1<<1),	///< Flag de fin de recepción
-		FLAG_RTIMED =   	(1<<2),	///< Flag para indicar que ha ocurrido timeout en recepción
-		FLAG_SENDING = 		(1<<3),	///< Flag para indicar que hay un proceso de envío en marcha
-		FLAG_RXSTARTED = 	(1<<4),	///< Flag para indicar que hay un proceso de recepción en marcha
-		FLAG_RXFULL =		(1<<5),	///< Flag para indicar que el buffer de recepción está lleno
-		FLAG_TXFULL =  		(1<<6),	///< Flag para indicar que el buffer de transmisión está lleno
-		FLAG_RXERROR = 		(1<<7),	///< Flag para indicar un error en la recepción
+		FLAG_RECV =			(1<<2),	///< Flag de byte recibido
+		FLAG_RTIMED =   	(1<<3),	///< Flag para indicar que ha ocurrido timeout en recepción
+		FLAG_SENDING = 		(1<<4),	///< Flag para indicar que hay un proceso de envío en marcha
+		FLAG_RXSTARTED = 	(1<<5),	///< Flag para indicar que hay un proceso de recepción en marcha
+		FLAG_RXFULL =		(1<<6),	///< Flag para indicar que el buffer de recepción está lleno
+		FLAG_TXFULL =  		(1<<7),	///< Flag para indicar que el buffer de transmisión está lleno
+		FLAG_RXERROR = 		(1<<8),	///< Flag para indicar un error en la recepción
     };
 
 	/**--------------------------------------------------------------------------------------
@@ -63,6 +64,7 @@ public:
 		EORByIdleTime,	//!< Tras una detección de IDLE
 		EORByTicker,	//!< Tras una temporización del ticker
 		EORByFlagSize,	//!< Tras cumplirse una condición de flags (HEAD, FOOT) y size
+		EORContinuous,	//!< No hay detección de fin de trama ya que éstas se pueden concatenar
 	};
 
 	/**
@@ -85,9 +87,10 @@ public:
 	 * Constructor
 	 * @param t_bytes Tiempo del nº de bytes para notificar un fin de recepción
      */
-    ISerial(float t_bytes){
-    	_t_bytes = t_bytes;
-    	_eor_mode = EORByTicker;
+    ISerial(){
+    	_t_bytes = 0;
+    	_eor_mode = EORContinuous;
+    	_is_ready = false;
     }
 
 
@@ -95,6 +98,16 @@ public:
 	 * Destructor
      */
     virtual ~ISerial(){}
+
+
+    /**--------------------------------------------------------------------------------------
+	 * Método para configurar el modo EORByTicker
+     * @param t_bytes Tiempo del nº de bytes para notificar un fin de recepción
+     */
+    virtual void setEORByTicker(float t_bytes){
+    	_eor_mode = EORByTicker;
+    	_t_bytes = t_bytes;
+    }
 
 
     /**--------------------------------------------------------------------------------------
@@ -149,10 +162,18 @@ public:
      */
     virtual int sendComplete(uint8_t *data, int size) = 0;
 
+
+    /**--------------------------------------------------------------------------------------
+     * Chequea si está listo
+	 * @return True o False
+     */
+    virtual bool isReady() {return _is_ready;}
+
 protected:
     EORMode _eor_mode;
     EORFlagSize_t _eor_fs_cfg;
     float _t_bytes;
+    bool _is_ready;
 
     /**
      * Estructura de control para el análisis EORFlagSize
