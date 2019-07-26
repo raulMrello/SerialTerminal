@@ -38,31 +38,37 @@ static const char* _MODULE_ = "[SerialMon].....";
 
 
 //---------------------------------------------------------------------------------
-SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name) : _name(name) {
+SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name) : _name(name), ISerial() {
 	
 	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Iniciando SerialMon: %s", name);
 
 	// inicializa buffers
-    _txbuf.mem = new char[txBufferSize]();
+    _txbuf.mem = new uint8_t[txBufferSize]();
     MBED_ASSERT(_txbuf.mem);
-	_txbuf.limit = (char*)&_txbuf.mem[txBufferSize];
+	_txbuf.limit = (uint8_t*)&_txbuf.mem[txBufferSize];
 	_txbuf.in = _txbuf.mem;
 	_txbuf.ou = _txbuf.in;
 	_txbuf.sz = txBufferSize;
 	memset(_txbuf.mem, 0, txBufferSize);
 
-    _rxbuf.mem = new char[rxBufferSize]();
+    _rxbuf.mem = new uint8_t[rxBufferSize]();
     MBED_ASSERT(_rxbuf.mem);
-	_rxbuf.limit = (char*)&_rxbuf.mem[rxBufferSize];
+	_rxbuf.limit = (uint8_t*)&_rxbuf.mem[rxBufferSize];
 	_rxbuf.in = _rxbuf.mem;
 	_rxbuf.ou = _rxbuf.in;
 	_rxbuf.sz = rxBufferSize;
 	memset(_rxbuf.mem, 0, rxBufferSize);
 
 	/** Inicializa callbacks */
-    _cb_rx = (Callback< void(uint8_t*, int, Flags)>) NULL;
-    _cb_tx = (Callback< void(Flags)>) NULL;
+    _cb_rx = callback(this, &SerialMon::_defaultRxUnhandledCallback);
+    _cb_tx = callback(this, &SerialMon::_defaultTxUnhandledCallback);
 
+    /** Inicializa controladores de análisis de trama */
+	ac_isr = {0};
+	ac_task = {0};
+	_max_msg_size = 0;
+	_curr_rx_msg = NULL;
+	_curr_rx_msg_start = NULL;
 	
 	// inicia el dispositivo serie,
     _serial = new RawSerial(tx, rx, baud);
@@ -72,8 +78,8 @@ SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize,
     _serial->attach(0, (SerialBase::IrqType)TxIrq);
     _serial->attach(0, (SerialBase::IrqType)RxIrq);
 
-    // establece el timeout para detección de fin de trama (IDLE por timeout software 2.5 byte_time)
-    _us_timeout = (uint32_t) (1 + (2.5 * 10 * 1000000)/baud);
+    // establece el timeout para detección de fin de trama (IDLE por timeout software x byte_time)
+    _us_timeout = 0;
 
     // inicializa el thread
     _th = NULL;
@@ -103,15 +109,18 @@ SerialMon::~SerialMon(){
     delete(_th);
 }
 
-
 //---------------------------------------------------------------------------------
 void SerialMon::setLoggingLevel(esp_log_level_t level){
 	esp_log_level_set(_MODULE_, level);
 }
 
 //---------------------------------------------------------------------------------
-void SerialMon::start(osPriority priority, uint32_t stack_size){
+void SerialMon::start(uint32_t max_msg_size, osPriority priority, uint32_t stack_size){
 	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Arrancando thread SerialMon: %s", _name);
+
+	_max_msg_size = max_msg_size;
+	_curr_rx_msg = new uint8_t[_max_msg_size]();
+	MBED_ASSERT(_curr_rx_msg);
 
 	// si el no existe, lo crea
 	if(_th == NULL){
@@ -120,21 +129,31 @@ void SerialMon::start(osPriority priority, uint32_t stack_size){
 	}
 
 	// si no está iniciado lo hace
-	if(_th->get_state() == Thread::Inactive){
+	if(_th->get_state() == Thread::Deleted){
 		_th->start(callback(this, &SerialMon::_task));
 	}
 }
 
 
 //---------------------------------------------------------------------------------
-void SerialMon::attachRxCallback(Callback<void(uint8_t*, int, SerialMon::Flags)> cb){
-	_cb_rx = cb;
+void SerialMon::attachRxCallback(Callback<void(uint8_t*, int, Flags)> cb){
+	if(cb != (Callback<void(uint8_t*, int, Flags)>) NULL){
+		_cb_rx = cb;
+	}
+	else{
+		_cb_rx = callback(this, &SerialMon::_defaultRxUnhandledCallback);
+	}
 }
 
 
 //---------------------------------------------------------------------------------
-void SerialMon::attachTxCallback(Callback<void(SerialMon::Flags)> cb){
-	_cb_tx = cb;
+void SerialMon::attachTxCallback(Callback<void(Flags)> cb){
+	if(cb != (Callback<void(Flags)>) NULL){
+		_cb_tx = cb;
+	}
+	else{
+	    _cb_tx = callback(this, &SerialMon::_defaultTxUnhandledCallback);
+	}
 }
 
 
@@ -142,15 +161,12 @@ void SerialMon::attachTxCallback(Callback<void(SerialMon::Flags)> cb){
 int SerialMon::send(uint8_t* data, int size){
     _mtx.lock();
 
-    // chequea el tamaño que queda disponible del buffer de transmisión para no sobrepasar su capacidad
-    int remaining = (_txbuf.in >= _txbuf.ou)? ((_txbuf.limit-_txbuf.in)+(_txbuf.ou-_txbuf.mem)) : (_txbuf.ou-_txbuf.in);
-    if(remaining == 0){
-    	_mtx.unlock();
-    	return 0;
-    }
-    if(size > remaining){
-		size = remaining;
-    }
+	int free_size = (_txbuf.ou <= _txbuf.in)? ((_txbuf.limit -_txbuf.in) + (_txbuf.ou - _txbuf.mem)) : ((_txbuf.ou-1) - _txbuf.in);
+	if(free_size < size){
+		_mtx.unlock();
+		DEBUG_TRACE_E(_EXPR_, _MODULE_, "No hay espacio suficiente para el envio %d < %d", size, free_size);
+		return 0;
+	}
 
     // inserta los datos en el buffer
     for(int i=0;i<size;i++){
@@ -158,14 +174,12 @@ int SerialMon::send(uint8_t* data, int size){
         _txbuf.in = (_txbuf.in >= _txbuf.limit)? _txbuf.mem : _txbuf.in;
     }
 
+    DEBUG_TRACE_I(_EXPR_, _MODULE_, "Se han encolado %d nuevos bytes", size);
     // si no hay ningún envío en marcha, lo inicia asociando el manejador de interrupciones
     if((_stat & FLAG_SENDING)==0){
         _stat |= FLAG_SENDING;
-        if((_stat & FLAG_STARTED)!=0){
-            _serial->attach(0, (SerialBase::IrqType)TxIrq);
-            _txCallback();
-        }
-        _stat |= FLAG_STARTED;
+        _serial->attach(0, (SerialBase::IrqType)TxIrq);
+        _txCallback();
         _serial->attach(callback(this, &SerialMon::_txCallback), (SerialBase::IrqType)TxIrq);
     }
 
@@ -178,7 +192,7 @@ int SerialMon::send(uint8_t* data, int size){
 int SerialMon::sendComplete(uint8_t* data, int size){
 	// si hay una operación bloqueante en curso, no permite otros envíos
 	if(_sem != NULL){
-		return -1;
+		return 0;
 	}
 
 	_mtx.lock();
@@ -212,82 +226,116 @@ void SerialMon::_task(){
     _serial->attach(callback(this, &SerialMon::_rxCallback), (SerialBase::IrqType)RxIrq);
 
     DEBUG_TRACE_D(_EXPR_, _MODULE_, "Thread iniciado SerialMon: %s. Esperando eventos", _name);
+    _is_ready = true;
 
     // espera eventos hardware forever and ever...
     for(;;){
-        osEvent oe = _th->signal_wait(osFlagsWaitAny, osWaitForever);
+		osEvent oe = _th->signal_wait(osFlagsWaitAny, osWaitForever);
 
-        // si es un flag de fin de trama
-        if(oe.status == osEventSignal && (oe.value.signals & FLAG_EOR) != 0){
-			// despacha las trama pendiente
-        	int len=0;
-        	uint8_t* data = _read(len);
-        	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Notificando trama recibida size=%d", len);
-			_cb_rx(data, len, FLAG_EOR);
-			if(data){
-				delete(data);
-			}
-        	// borra el flag
-			_th->signal_clr(FLAG_EOR);
+		// si es un flag de fin de trama o de nuevo byte recibido...
+        if(oe.status == osEventSignal &&  (oe.value.signals & (FLAG_RECV|FLAG_EOR)) != 0){
+        	// lee el buffer, lo procesa y notifica en caso de encontrar una trama válida
+        	_read();
         }
 
         // si es un flag de timeout, lo notifica
-        if(oe.status == osEventSignal && (oe.value.signals & FLAG_RTIMED) != 0){
+        if(oe.status == osEventSignal &&  (oe.value.signals & FLAG_RTIMED) != 0){
         	DEBUG_TRACE_W(_EXPR_, _MODULE_, "Notificando FLAG_RTIMED");
         	_cb_rx(0, 0, FLAG_RTIMED);
-        	_th->signal_clr(FLAG_RTIMED);
         }
 
         // si es un flag de error en recepción por buffer lleno, lo notifica
-        if(oe.status == osEventSignal && (oe.value.signals & FLAG_RXFULL) != 0){
+        if(oe.status == osEventSignal &&  (oe.value.signals & FLAG_RXFULL) != 0){
         	DEBUG_TRACE_W(_EXPR_, _MODULE_, "Notificando FLAG_RXFULL");
         	_cb_rx(0, 0, FLAG_RXFULL);
-        	_th->signal_clr(FLAG_RXFULL);
         }
 
         // si es un flag de fin de transmisión, lo notifica
-        if(oe.status == osEventSignal && (oe.value.signals & FLAG_EOT) != 0){
+        if(oe.status == osEventSignal &&  (oe.value.signals & FLAG_EOT) != 0){
         	// si ha sido un envío bloqueante por semáforo, lo libera
         	if(_sem != NULL){
         		_sem->release();
         	}
         	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Notificando trama enviada");
         	_cb_tx(FLAG_EOT);
-        	_th->signal_clr(FLAG_EOT);
         }
     }
 }
 
 
 //---------------------------------------------------------------------------------
-uint8_t* SerialMon::_read(int& size) {
-	size = (_rxbuf.ou <= _rxbuf.in)? (_rxbuf.in - _rxbuf.ou) : (_rxbuf.limit - _rxbuf.in) + (_rxbuf.ou - _rxbuf.mem);
-	if(size <= 0){
-		return NULL;
+void SerialMon::_read() {
+	uint8_t* ptr_end = _rxbuf.in;
+	if(_curr_rx_msg_start == NULL){
+		_curr_rx_msg = _rxbuf.ou;
+		ac_task = {0};
+		DEBUG_TRACE_D(_EXPR_, _MODULE_, "Reiniciado puntero de busqueda");
 	}
-	uint8_t* data = new uint8_t[size]();
-	MBED_ASSERT(data);
-	for(int s=0; s<size; s++) {
-        data[s] = (uint8_t)*_rxbuf.ou++;
-        _rxbuf.ou = (_rxbuf.ou >= _rxbuf.limit)? _rxbuf.mem : _rxbuf.ou;
-        if(_rxbuf.in != _rxbuf.ou){
+	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Procesando buffer %s", cpp_utils::bin2str(_curr_rx_msg, ptr_end - _curr_rx_msg));
+	while(_curr_rx_msg != ptr_end){
+		uint8_t* curr_ptr = _curr_rx_msg;
+		uint8_t d = (uint8_t)*_curr_rx_msg++;
+		if(_curr_rx_msg >= _rxbuf.limit){
+			_curr_rx_msg = _rxbuf.mem;
+		}
+
+		DEBUG_TRACE_D(_EXPR_, _MODULE_, "Procesando byte %x", d);
+		ISerial::AnalysisResult res = ISerial::_analyzeByte(d, ac_task);
+		if(res == ISerial::Wrong || res == ISerial::Discarded){
+			DEBUG_TRACE_D(_EXPR_, _MODULE_, "Byte descartado. Reajusto _rxbuf.ou");
+			_rxbuf.ou = _curr_rx_msg;
+			_curr_rx_msg_start = NULL;
 			_stat &= ~FLAG_RXFULL;
-        }
-    }
-    return data;
+		}
+		else if(res == ISerial::Start){
+			_curr_rx_msg_start = curr_ptr;
+			DEBUG_TRACE_D(_EXPR_, _MODULE_, "Identificado inicio de trama en %x", _curr_rx_msg_start);
+		}
+		else if(res == ISerial::Valid){
+			DEBUG_TRACE_D(_EXPR_, _MODULE_, "Identificado fin de trama en %x", _curr_rx_msg);
+			int size = (_curr_rx_msg_start <= _curr_rx_msg)? (_curr_rx_msg - _curr_rx_msg_start) : (_rxbuf.limit - _curr_rx_msg_start) + (_curr_rx_msg - _rxbuf.mem);
+			DEBUG_TRACE_D(_EXPR_, _MODULE_, "Tamaño de trama = %d", size);
+			if(size > 0){
+				uint8_t* data = new uint8_t[size]();
+				MBED_ASSERT(data);
+				int p=0;
+				DEBUG_TRACE_D(_EXPR_, _MODULE_, "Copiando datos", size);
+				while(_curr_rx_msg_start != _curr_rx_msg){
+					data[p++] = *_curr_rx_msg_start++;
+					if(_curr_rx_msg_start >= _rxbuf.limit){
+						_curr_rx_msg_start = _rxbuf.mem;
+					}
+				}
+				DEBUG_TRACE_D(_EXPR_, _MODULE_, "Reajuste de buffer de recepcion");
+				_rxbuf.ou = _curr_rx_msg;
+				_stat &= ~FLAG_RXFULL;
+				_curr_rx_msg_start = NULL;
+				DEBUG_TRACE_D(_EXPR_, _MODULE_, "Notificando trama recibida size=%d", size);
+				_cb_rx(data, size, FLAG_EOR);
+				delete(data);
+			}
+			else{
+				DEBUG_TRACE_W(_EXPR_, _MODULE_, "Tamaño=0, ERROR. Reajuste de buffer de recepcion");
+				_rxbuf.ou = _curr_rx_msg;
+				_stat &= ~FLAG_RXFULL;
+				_curr_rx_msg_start = NULL;
+			}
+		}
+	}
 }
 
 
 //---------------------------------------------------------------------------------
 void SerialMon::_txCallback(){
 	// envía el siguiente dato pendiente de envío
-    if ((_serial->writeable()) && (_txbuf.in != _txbuf.ou)) {
-        char c = *_txbuf.ou;
+    if((_serial->writeable()) && (_txbuf.in != _txbuf.ou)) {
+    	uint8_t c = *_txbuf.ou;
         _serial->putc(c);
         _txbuf.ou++;
         _txbuf.ou = (_txbuf.ou >= _txbuf.limit)? _txbuf.mem : _txbuf.ou;
         return;
     }
+
 	// si ha terminado, borra el flag de envío y activa el flag EOT
     _stat &= ~FLAG_SENDING;
 
@@ -304,12 +352,12 @@ void SerialMon::_rxCallback(){
 	// mientras haya datos pendientes, los almacena en el buffer
     while(_serial->readable()){
     	// lee byte a byte
-        char c = _serial->getc();
+    	uint8_t c = _serial->getc();
 
 		// si el buffer está lleno, notifica error
         if((_stat & FLAG_RXFULL)!=0){
         	// notifica flag a la tarea
-			_th->signal_set(FLAG_RXFULL);
+        	_th->signal_set(FLAG_RXFULL);
             return;
         }
 
@@ -320,16 +368,43 @@ void SerialMon::_rxCallback(){
         if(_rxbuf.in == _rxbuf.ou){
             _stat |= FLAG_RXFULL;
         }
-
-		// reajusta el timer de detección de línea IDLE
-        _rx_tick.attach_us(callback(this, &SerialMon::_timeoutCallback), _us_timeout);
+        // en modo contínuo, notifica la llegada de un nuevo byte
+        if(ISerial::_eor_mode == ISerial::EORContinuous){
+        	_stat |= FLAG_RXSTARTED;
+        	_th->signal_set(FLAG_RECV);
+        	return;
+        }
+        // en modo detección de fin de trama por ticker y en cada byte recibido
+        if (ISerial::_eor_mode == ISerial::EORByTicker){
+        	// marca el flag y activa la callback
+        	_stat |= FLAG_RXSTARTED;
+        	// reajusta el timer de detección de fin de trama
+        	_rx_tick.attach_us(callback(this, &SerialMon::_timeoutCallback), _us_timeout);
+        	return;
+        }
+        // en modo detección de trama por IDLE, si es el primer byte
+        if (ISerial::_eor_mode == ISerial::EORByIdleTime && (_stat & FLAG_RXSTARTED)==0){
+        	// actualiza el flag de estado y habilita la callback
+        	_stat |= FLAG_RXSTARTED;
+        	_serial->attach(callback(this, &SerialMon::_rxIdleCallback), (SerialBase::IrqType)IdleIrq);
+        	return;
+        }
     }
 }
 
 
 //---------------------------------------------------------------------------------
+void SerialMon::_rxIdleCallback(){
+	_stat &= ~FLAG_RXSTARTED;
+	_serial->attach(0, (SerialBase::IrqType)IdleIrq);
+	_th->signal_set(FLAG_EOR);
+}
+
+
+//---------------------------------------------------------------------------------
 void SerialMon::_timeoutCallback(){
+	_stat &= ~FLAG_RXSTARTED;
 	_rx_tick.detach();
-    _th->signal_set(FLAG_EOR);
+	_th->signal_set(FLAG_EOR);
 }
 
