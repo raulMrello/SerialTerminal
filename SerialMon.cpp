@@ -40,6 +40,7 @@ static const char* _MODULE_ = "[SerialMon].....";
 //---------------------------------------------------------------------------------
 SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name) : _name(name), ISerial() {
 	
+	setLoggingLevel(ESP_LOG_DEBUG);
 	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Iniciando SerialMon: %s", name);
 
 	// inicializa buffers
@@ -64,9 +65,7 @@ SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize,
     _cb_tx = callback(this, &SerialMon::_defaultTxUnhandledCallback);
 
     /** Inicializa controladores de análisis de trama */
-	ac_isr = {0};
 	ac_task = {0};
-	_max_msg_size = 0;
 	_curr_rx_msg = NULL;
 	_curr_rx_msg_start = NULL;
 	
@@ -118,8 +117,6 @@ void SerialMon::setLoggingLevel(esp_log_level_t level){
 void SerialMon::start(uint32_t max_msg_size, osPriority priority, uint32_t stack_size){
 	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Arrancando thread SerialMon: %s", _name);
 
-	_max_msg_size = max_msg_size;
-	_curr_rx_msg = new uint8_t[_max_msg_size]();
 	MBED_ASSERT(_curr_rx_msg);
 
 	// si el no existe, lo crea

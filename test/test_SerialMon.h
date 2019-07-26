@@ -13,7 +13,7 @@
 #if defined(ENABLE_TEST_DEBUGGING)
 
 //#### COMENTAR PARA DESACTIVAR ####
-//#define ENABLE_TEST_SerialMon		//!< Habilita los tests del módulo 'SerialMon'
+#define ENABLE_TEST_SerialMon		//!< Habilita los tests del módulo 'SerialMon'
 
 
 
