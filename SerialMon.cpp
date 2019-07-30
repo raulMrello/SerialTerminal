@@ -38,12 +38,16 @@ static const char* _MODULE_ = "[SerialMon].....";
 
 
 //---------------------------------------------------------------------------------
+#if __MBED__ == 1
 SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name) : _name(name), ISerial() {
-	
+#elif ESP_PLATFORM == 1
+SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name, uart_port_t uart_num) : _name(name), ISerial() {
+#endif
 	setLoggingLevel(ESP_LOG_DEBUG);
 	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Iniciando SerialMon: %s", name);
 
 	// inicializa buffers
+	#if __MBED__ == 1
     _txbuf.mem = new uint8_t[txBufferSize]();
     MBED_ASSERT(_txbuf.mem);
 	_txbuf.limit = (uint8_t*)&_txbuf.mem[txBufferSize];
@@ -51,6 +55,7 @@ SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize,
 	_txbuf.ou = _txbuf.in;
 	_txbuf.sz = txBufferSize;
 	memset(_txbuf.mem, 0, txBufferSize);
+	#endif
 
     _rxbuf.mem = new uint8_t[rxBufferSize]();
     MBED_ASSERT(_rxbuf.mem);
@@ -70,12 +75,38 @@ SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize,
 	_curr_rx_msg_start = NULL;
 	
 	// inicia el dispositivo serie,
+	#if __MBED__ == 1
     _serial = new RawSerial(tx, rx, baud);
     MBED_ASSERT(_serial);
 
     // desconecta las interrupciones serie
     _serial->attach(0, (SerialBase::IrqType)TxIrq);
     _serial->attach(0, (SerialBase::IrqType)RxIrq);
+	#elif ESP_PLATFORM == 1
+    _en_rx = false;
+    _uart_num = uart_num;
+    uart_config_t uart_config = {
+			baud,						//!< baud_rate
+			UART_DATA_8_BITS,			//!< data_bits
+			UART_PARITY_DISABLE,		//!< parity
+			UART_STOP_BITS_1,			//!< stop_bits
+			UART_HW_FLOWCTRL_DISABLE, 	//!< flow_ctrl
+			0,							//!< rx_flow_ctrl_thresh
+			false						//!< use_ref_tick
+		};
+    PinName rts=NC, cts = NC;
+	DEBUG_TRACE_D(_EXPR_, _MODULE_, "ajustando params, ");
+	DEBUG_CHECK(uart_param_config(_uart_num, &uart_config) == ESP_OK);
+	DEBUG_TRACE_D(_EXPR_, _MODULE_, "pines, ");
+	DEBUG_CHECK(uart_set_pin(_uart_num, tx, rx, (rts==NC)? UART_PIN_NO_CHANGE : rts, (cts==NC)? UART_PIN_NO_CHANGE : cts) == ESP_OK);
+	DEBUG_TRACE_D(_EXPR_, _MODULE_, "instalando!");
+
+	_install_result = uart_driver_install(_uart_num, rxBufferSize, txBufferSize, DefaultQueueDepth, &_queue, 0);
+	if(_install_result != ESP_OK){
+		DEBUG_TRACE_E(_EXPR_, _MODULE_, "ERROR al instalar el driver uart err=%d", _install_result);
+	}
+
+	#endif
 
     // establece el timeout para detección de fin de trama (IDLE por timeout software x byte_time)
     _us_timeout = 0;
@@ -91,15 +122,27 @@ SerialMon::SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize,
 
 //---------------------------------------------------------------------------------
 SerialMon::~SerialMon(){
+
+	#if __MBED__ == 1
 	// desactiva interrupciones serie
     _serial->attach(0, (SerialBase::IrqType)TxIrq);
     _serial->attach(0, (SerialBase::IrqType)RxIrq);
 
     // desconecta el puerto serie
     delete(_serial);
+	#elif ESP_PLATFORM == 1
+	// desactivo interrupciones tx,rx
+    uart_disable_rx_intr(_uart_num);
+    uart_disable_tx_intr(_uart_num);
+    // libero isr y driver
+    uart_isr_free(_uart_num);
+    uart_driver_delete(_uart_num);
+	#endif
 
     // libera buffers
+	#if __MBED__ == 1
     delete(_txbuf.mem);
+	#endif
     delete(_rxbuf.mem);
 
     // finaliza el hilo
@@ -115,6 +158,14 @@ void SerialMon::setLoggingLevel(esp_log_level_t level){
 
 //---------------------------------------------------------------------------------
 void SerialMon::start(uint32_t max_msg_size, osPriority priority, uint32_t stack_size){
+
+	#if ESP_PLATFORM == 1
+	if(_install_result != ESP_OK){
+		DEBUG_TRACE_E(_EXPR_, _MODULE_, "ERROR al instalar el driver uart err=%d", _install_result);
+		return;
+	}
+	#endif
+
 	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Arrancando thread SerialMon: %s", _name);
 
 	MBED_ASSERT(_curr_rx_msg);
@@ -158,6 +209,7 @@ void SerialMon::attachTxCallback(Callback<void(Flags)> cb){
 int SerialMon::send(uint8_t* data, int size){
     _mtx.lock();
 
+	#if __MBED__ == 1
 	int free_size = (_txbuf.ou <= _txbuf.in)? ((_txbuf.limit -_txbuf.in) + (_txbuf.ou - _txbuf.mem)) : ((_txbuf.ou-1) - _txbuf.in);
 	if(free_size < size){
 		_mtx.unlock();
@@ -180,6 +232,19 @@ int SerialMon::send(uint8_t* data, int size){
         _serial->attach(callback(this, &SerialMon::_txCallback), (SerialBase::IrqType)TxIrq);
     }
 
+    #elif ESP_PLATFORM == 1
+    DEBUG_TRACE_D(_EXPR_, _MODULE_, "Sending %d bytes from buffer... ", size);
+    int sent = 0;
+    if((sent = uart_write_bytes(_uart_num, (const char*)data, size)) != -1){
+    	DEBUG_TRACE_D(_EXPR_, _MODULE_, "OK!, pushed into fifo %d bytes", sent);
+    	size = sent;
+    }
+    else{
+    	DEBUG_TRACE_E(_EXPR_, _MODULE_, "ERROR!");
+    	size = 0;
+    }
+    #endif
+
     _mtx.unlock();
     return size;
 }
@@ -193,7 +258,7 @@ int SerialMon::sendComplete(uint8_t* data, int size){
 	}
 
 	_mtx.lock();
-	_sem = new Semaphore();
+	_sem = new Semaphore(0, 1);
 	MBED_ASSERT(_sem);
 
 	// si se pueden enviar datos, espera a que se libere el semáforo para devolver el control
@@ -220,16 +285,21 @@ int SerialMon::sendComplete(uint8_t* data, int size){
 void SerialMon::_task(){
 
     // se conecta al módulo de recepción
+	#if __MBED__==1
     _serial->attach(callback(this, &SerialMon::_rxCallback), (SerialBase::IrqType)RxIrq);
+	#elif ESP_PLATFORM == 1
+    _en_rx = true;
+	#endif
 
     DEBUG_TRACE_D(_EXPR_, _MODULE_, "Thread iniciado SerialMon: %s. Esperando eventos", _name);
     _is_ready = true;
 
     // espera eventos hardware forever and ever...
     for(;;){
-		osEvent oe = _th->signal_wait(osFlagsWaitAny, osWaitForever);
+		#if __MBED__==1
+    	osEvent oe = _th->signal_wait(osFlagsWaitAny, osWaitForever);
 
-		// si es un flag de fin de trama o de nuevo byte recibido...
+		// si es un flag de fin de trama o de nuevos bytes recibidos...
         if(oe.status == osEventSignal &&  (oe.value.signals & (FLAG_RECV|FLAG_EOR)) != 0){
         	// lee el buffer, lo procesa y notifica en caso de encontrar una trama válida
         	_read();
@@ -256,6 +326,135 @@ void SerialMon::_task(){
         	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Notificando trama enviada");
         	_cb_tx(FLAG_EOT);
         }
+
+		#elif ESP_PLATFORM == 1
+        uart_event_t event;
+		if (xQueueReceive(_queue, (void * )&event, (portTickType)osWaitForever)){
+			uart_event_t*  evt = &event;
+			MBED_ASSERT(evt);
+			_curr_event = evt->type;
+			switch (evt->type) {
+				// si es un flag de fin de transmisión, lo notifica
+				case UART_DATA_BREAK: {
+		        	// si ha sido un envío bloqueante por semáforo, lo libera
+		        	if(_sem != NULL){
+		        		_sem->release();
+		        	}
+		        	DEBUG_TRACE_D(_EXPR_, _MODULE_, "Notificando trama enviada");
+		        	_cb_tx(FLAG_EOT);
+					break;
+				}
+
+				// si es un flag de fin de trama o de nuevos bytes recibidos...
+				case UART_DATA:
+				case UART_BREAK: {
+					if(_en_rx){
+						DEBUG_TRACE_D(_EXPR_, _MODULE_, "EVT: uart_data ");
+						size_t bytes = 0;
+						uart_get_buffered_data_len(_uart_num, &bytes);
+						DEBUG_TRACE_D(_EXPR_, _MODULE_, "%d bytes", bytes);
+						_cb_rx.call();
+						uint8_t* buffer = new uint8_t[bytes];
+						MBED_ASSERT(buffer);
+						int count = gets(buffer, (uint16_t)bytes);
+
+						// mientras haya datos pendientes, los almacena en el buffer
+					    for(int i=0; i<count; i++){
+					    	// lee byte a byte
+					    	uint8_t c = buffer[i];
+
+							// si el buffer está lleno, notifica error
+					        if((_stat & FLAG_RXFULL)!=0){
+					        	DEBUG_TRACE_W(_EXPR_, _MODULE_, "Notificando FLAG_RXFULL");
+								_cb_rx(0, 0, FLAG_RXFULL);
+					            break;
+					        }
+
+					        // si hay espacio, lo almacena
+					        *_rxbuf.in++ = c;
+					        _rxbuf.in = (_rxbuf.in >= _rxbuf.limit)? _rxbuf.mem : _rxbuf.in;
+							// si se completa el buffer, marca estado
+					        if(_rxbuf.in == _rxbuf.ou){
+					            _stat |= FLAG_RXFULL;
+					        }
+					        // en modo contínuo, notifica la llegada de un nuevo byte
+					        if(ISerial::_eor_mode == ISerial::EORContinuous){
+					        	_stat |= FLAG_RXSTARTED;
+					        	_read();
+					        	continue;
+					        }
+					        // en modo detección de fin de trama por ticker y en cada byte recibido
+					        if (ISerial::_eor_mode == ISerial::EORByTicker){
+					        	// marca el flag y activa la callback
+					        	_stat |= FLAG_RXSTARTED;
+					        	// reajusta el timer de detección de fin de trama
+					        	_rx_tick.attach_us(callback(this, &SerialMon::_timeoutCallback), _us_timeout);
+					        	continue;
+					        }
+					    }
+						delete(buffer);
+					}
+					else{
+						uart_flush(_uart_num);
+					}
+					/* Event of UART receiving data
+					 * We'd better handler data event fast, there would be much more data events
+					 * than other types of events.
+					 * If we take too much time on data event, the queue might be full.
+					 * In this example, we don't process data in event, but read data outside.
+					 */
+					break;
+				}
+
+				/// Error fifo overflow
+				case UART_FIFO_OVF: {
+					DEBUG_TRACE_W(_EXPR_, _MODULE_, "Notificando UART_FIFO_OVF");
+					// If fifo overflow happened, you should consider adding flow control for your application.
+					// We can read data out out the buffer, or directly flush the Rx buffer.
+					uart_flush(_uart_num);
+					_cb_rx(0, 0, FLAG_RXERROR);
+					break;
+				}
+
+				/// Error buffer lleno
+				case UART_BUFFER_FULL: {
+					DEBUG_TRACE_W(_EXPR_, _MODULE_, "Notificando FLAG_RXFULL");
+					// If buffer full happened, you should consider increasing your buffer size
+					// We can read data out out the buffer, or directly flush the Rx buffer.
+					uart_flush(_uart_num);
+					_cb_rx(0, 0, FLAG_RXFULL);
+					break;
+				}
+
+				/// Error de paridad
+				case UART_PARITY_ERR: {
+					DEBUG_TRACE_W(_EXPR_, _MODULE_, "EVT: uart_parity_err!");
+					uart_flush(_uart_num);
+					_cb_rx(0, 0, FLAG_RXERROR);
+					break;
+				}
+
+				/// Error de frame
+				case UART_FRAME_ERR: {
+					DEBUG_TRACE_W(_EXPR_, _MODULE_, "EVT: uart_frame_err!");
+					uart_flush(_uart_num);
+					_cb_rx(0, 0, FLAG_RXERROR);
+					break;
+				}
+
+				/// Detección de patrón recibido
+				case UART_PATTERN_DET: {
+					DEBUG_TRACE_W(_EXPR_, _MODULE_, "EVT: uart_pattern_det!");
+					break;
+				}
+
+				default:
+					DEBUG_TRACE_W(_EXPR_, _MODULE_, "EVT: unhandled_evt=%d!", evt->type);
+					break;
+			}
+		}
+		#endif
+
     }
 }
 
@@ -323,6 +522,7 @@ void SerialMon::_read() {
 
 
 //---------------------------------------------------------------------------------
+#if __MBED__ == 1
 void SerialMon::_txCallback(){
 	// envía el siguiente dato pendiente de envío
     if((_serial->writeable()) && (_txbuf.in != _txbuf.ou)) {
@@ -342,9 +542,11 @@ void SerialMon::_txCallback(){
     // notifica flag a la tarea
     _th->signal_set(FLAG_EOT);
 }
+#endif
 
 
 //---------------------------------------------------------------------------------
+#if __MBED__ == 1
 void SerialMon::_rxCallback(){
 	// mientras haya datos pendientes, los almacena en el buffer
     while(_serial->readable()){
@@ -388,15 +590,17 @@ void SerialMon::_rxCallback(){
         }
     }
 }
+#endif
 
 
 //---------------------------------------------------------------------------------
+#if __MBED__ == 1
 void SerialMon::_rxIdleCallback(){
 	_stat &= ~FLAG_RXSTARTED;
 	_serial->attach(0, (SerialBase::IrqType)IdleIrq);
 	_th->signal_set(FLAG_EOR);
 }
-
+#endif
 
 //---------------------------------------------------------------------------------
 void SerialMon::_timeoutCallback(){

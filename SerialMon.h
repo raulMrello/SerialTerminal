@@ -32,7 +32,9 @@
 
 #include "mbed.h"
 #include "ISerial.h"
+#if __MBED__==1
 #include "mdf_api_cortex.h"
+#endif
 #include "cpp_utils.h"
 
 
@@ -45,6 +47,7 @@
 class SerialMon : public ISerial {
 public:
 
+	#if __MBED__==1
     /**--------------------------------------------------------------------------------------
      * Constructor
      * @param tx PinName TX pin.
@@ -53,9 +56,13 @@ public:
      * @param rxBufferSize Tamaño buffer recepción
      * @param baud Baudrate
      * @param name Nombre del objeto
+     * @param uart_num [ESP32] Identificador de la uart utilizada
+     *
      */    
-    SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name = (const char*)"NO NAME");
- 
+    SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name);
+	#elif ESP_PLATFORM == 1
+	SerialMon(PinName tx, PinName rx, int txBufferSize, int rxBufferSize, int baud, const char* name, uart_port_t uart_num);
+	#endif
     
     /**--------------------------------------------------------------------------------------
      * Destructor
@@ -127,7 +134,10 @@ protected:
 
 
     /** Puerto serie asociado */
+	#if __MBED__ == 1
     RawSerial *_serial;
+	#endif
+
 
     /** Timer y variable asociada para notificación de eventos de trama completa */
     Ticker _rx_tick;
@@ -149,7 +159,9 @@ protected:
     const char * _name;
 
     /** Buffers de transmisión y recepción */
+	#if __MBED__ == 1
     buffer_t _txbuf;
+	#endif
     buffer_t _rxbuf;
 
     /** Callbacks para notificación de eventos */
@@ -162,6 +174,16 @@ protected:
     /** Variables de control del procesado de la trama en curso */
     uint8_t* _curr_rx_msg;
     uint8_t* _curr_rx_msg_start;
+
+	#if ESP_PLATFORM == 1
+    uart_port_t _uart_num;
+    bool _en_rx;
+    /** Máximo número acumulado de eventos en la tarea asociada a la UART */
+    static const uint32_t DefaultQueueDepth = 16;
+    QueueHandle_t _queue;
+    uart_event_type_t _curr_event;
+    int _install_result;
+	#endif
 
 
     /**--------------------------------------------------------------------------------------
@@ -180,20 +202,25 @@ protected:
     /**--------------------------------------------------------------------------------------
      * Callback propia para manejar las interrupciones de recepción del puerto serie
      */
+	#if __MBED__ == 1
     void _rxCallback();
+	#endif
 
 
     /**--------------------------------------------------------------------------------------
      * Callback propia para manejar las interrupciones IDLE del puerto serie
      */
+	#if __MBED__ == 1
     void _rxIdleCallback();
+	#endif
 
 
     /**--------------------------------------------------------------------------------------
      * Callback propia para manejar las interrupciones de transmisión del puerto serie
      */
+	#if __MBED__ == 1
     void _txCallback();
-
+	#endif
 
     /**--------------------------------------------------------------------------------------
      * Callback propia para manejar las interrupciones de timeout en recepción
